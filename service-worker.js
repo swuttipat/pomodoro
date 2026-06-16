@@ -1,5 +1,5 @@
 /* Pomodoro PWA service worker — offline caching */
-const CACHE = 'pomodoro-v1';
+const CACHE = 'pomodoro-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -23,11 +23,25 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
-  e.respondWith(
-    caches.match(e.request).then(cached =>
-      cached || fetch(e.request).then(res => {
+  const req = e.request;
+  // Network-first for page loads so a new version shows immediately when online,
+  // falling back to cache when offline.
+  if (req.mode === 'navigate' || req.destination === 'document') {
+    e.respondWith(
+      fetch(req).then(res => {
         const copy = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+        caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
+        return res;
+      }).catch(() => caches.match(req).then(r => r || caches.match('./index.html')))
+    );
+    return;
+  }
+  // Cache-first for static assets (icons, manifest).
+  e.respondWith(
+    caches.match(req).then(cached =>
+      cached || fetch(req).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
         return res;
       }).catch(() => cached)
     )
