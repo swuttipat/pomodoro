@@ -1,5 +1,5 @@
 /* Pomodoro PWA service worker — offline caching */
-const CACHE = 'pomodoro-v3';
+const CACHE = 'pomodoro-v4';
 const ASSETS = [
   './',
   './index.html',

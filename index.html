@@ -262,7 +262,7 @@
       <button id="clearBtn" class="del">🗑 Clear history</button>
     </div>
     <p style="text-align:center;color:var(--muted);font-size:11px;margin-top:18px">
-      Data is stored only on this device. v1.1
+      Data is stored only on this device. v1.2
     </p>
   </section>
 </div>
@@ -277,7 +277,7 @@
 
 <script>
 /* ===================== STORAGE ===================== */
-const SKEY='pomo.sessions', CKEY='pomo.settings';
+const SKEY='pomo.sessions', CKEY='pomo.settings', TKEY='pomo.timer';
 const DEFAULTS={focusMin:25,shortMin:5,longMin:15,cycle:4,autoStart:false,sound:true,vibe:true};
 function load(k,f){try{return JSON.parse(localStorage.getItem(k))??f}catch(e){return f}}
 function save(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
@@ -286,7 +286,7 @@ let sessions=load(SKEY,[]); // {id,start,end,mode,label,minutes}
 
 /* ===================== STATE ===================== */
 const DUR=()=>({focus:settings.focusMin*60,short:settings.shortMin*60,long:settings.longMin*60});
-let mode='focus', remaining=DUR().focus, running=false, ticker=null, completedInCycle=0, sessionStart=null;
+let mode='focus', remaining=DUR().focus, running=false, ticker=null, completedInCycle=0, sessionStart=null, endAt=null;
 const PHASE={focus:'Focus',short:'Short Break',long:'Long Break'};
 
 /* ===================== HELPERS ===================== */
@@ -319,47 +319,102 @@ function setMode(m,resetTime=true){
   $$('.modes button').forEach(b=>b.classList.toggle('on',b.dataset.mode===m));
   $('h1 span').textContent=PHASE[m];
   if(resetTime){remaining=DUR()[m];}
-  renderTimer();
+  renderTimer();saveTimer();
+}
+/* Persist the live timer so a reload (e.g. iOS discarding the page on lock)
+   restores it instead of resetting to the default. */
+function saveTimer(){
+  save(TKEY,{mode,running,endAt,remaining,completedInCycle,sessionStart,label:$('#label').value});
 }
 function tick(){
-  remaining--;
-  if(remaining<=0){remaining=0;renderTimer();finishPhase();return;}
+  remaining=Math.max(0,Math.ceil((endAt-Date.now())/1000));
+  if(Date.now()>=endAt){remaining=0;renderTimer();finishPhase();return;}
   renderTimer();
 }
 function start(){
   if(running)return;
   running=true;$('#startBtn').textContent='Pause';
   if(mode==='focus'&&!sessionStart)sessionStart=Date.now();
-  ticker=setInterval(tick,1000);
+  endAt=Date.now()+remaining*1000;
+  saveTimer();
+  ticker=setInterval(tick,250);
 }
 function pause(){
-  running=false;$('#startBtn').textContent='Resume';clearInterval(ticker);
+  if(running&&endAt)remaining=Math.max(0,Math.ceil((endAt-Date.now())/1000));
+  running=false;endAt=null;$('#startBtn').textContent='Resume';clearInterval(ticker);
   document.title=PHASE[mode]+' — Pomodoro';
+  saveTimer();
 }
 function reset(){
   pause();$('#startBtn').textContent='Start';sessionStart=null;
-  remaining=fullDur();renderTimer();
+  remaining=fullDur();renderTimer();saveTimer();
 }
-function finishPhase(){
-  pause();$('#startBtn').textContent='Start';
-  alertUser();
+/* Advance one phase. `anchor` = the wall-clock time the phase actually ended
+   (now for live finishes, or the stored endAt when catching up after a reload).
+   `silent` suppresses the beep/buzz/toast during catch-up. */
+function advancePhase(anchor,silent){
   if(mode==='focus'){
-    logSession();           // record completed pomodoro
+    logSession(anchor);
     completedInCycle++;
     const next=(completedInCycle>=settings.cycle)?'long':'short';
     if(next==='long')completedInCycle=0;
     setMode(next);
-    toast('Pomodoro complete! Time for a break 🎉');
+    if(!silent)toast('Pomodoro complete! Time for a break 🎉');
   }else{
     setMode('focus');
-    toast('Break over — back to focus 💪');
+    if(!silent)toast('Break over — back to focus 💪');
   }
   sessionStart=null;
-  refreshStats();
-  if(settings.autoStart)start();
+  // auto-start the next phase from the moment the previous one actually ended
+  if(settings.autoStart){
+    running=true;$('#startBtn').textContent='Pause';
+    if(mode==='focus')sessionStart=anchor;
+    endAt=anchor+remaining*1000;
+  }else{
+    running=false;endAt=null;$('#startBtn').textContent='Start';
+  }
+  saveTimer();
 }
-function logSession(){
-  const end=Date.now(), start=sessionStart||(end-fullDur()*1000);
+function finishPhase(){
+  clearInterval(ticker);
+  alertUser();
+  advancePhase(Date.now(),false);
+  refreshStats();
+  if(running){ticker=setInterval(tick,250);}
+}
+/* On load, replay any phases that elapsed while the app was closed/locked,
+   then resume mid-countdown if still running. */
+function catchUp(){
+  let guard=0;
+  while(running&&endAt&&Date.now()>=endAt&&guard++<5000){
+    advancePhase(endAt,true);
+  }
+  if(running&&endAt){
+    $('#startBtn').textContent='Pause';
+    ticker=setInterval(tick,250);
+    remaining=Math.max(0,Math.ceil((endAt-Date.now())/1000));
+  }
+  renderTimer();refreshStats();saveTimer();
+}
+function restoreTimer(){
+  const t=load(TKEY,null);
+  if(!t){setMode('focus');return;}
+  completedInCycle=t.completedInCycle||0;
+  sessionStart=t.sessionStart||null;
+  if(t.label)$('#label').value=t.label;
+  setMode(t.mode||'focus',false);   // apply visuals without resetting time
+  if(t.running&&t.endAt){
+    running=true;endAt=t.endAt;
+    catchUp();                       // replay phases elapsed while away, then resume
+  }else{
+    running=false;endAt=null;
+    remaining=(t.remaining!=null)?t.remaining:fullDur();
+    $('#startBtn').textContent=(remaining<fullDur()&&remaining>0)?'Resume':'Start';
+    renderTimer();
+  }
+}
+function logSession(at){
+  const end=at||Date.now(), start=sessionStart||(end-fullDur()*1000);
   sessions.push({
     id:end, start, end, mode:'focus',
     label:($('#label').value.trim()||'Focus'),
@@ -491,7 +546,7 @@ $$('.stepper button').forEach(b=>b.addEventListener('click',()=>{
   const min=+st.dataset.min,max=+st.dataset.max,step=+st.dataset.step;
   let v=settings[key]+(+b.dataset.d)*step;v=Math.max(min,Math.min(max,v));
   settings[key]=v;save(CKEY,settings);st.querySelector('.val').textContent=v;
-  if(!running){remaining=fullDur();renderTimer();}
+  if(!running){remaining=fullDur();renderTimer();saveTimer();}
 }));
 $$('.switch input').forEach(c=>c.addEventListener('change',()=>{
   settings[c.dataset.set]=c.checked;save(CKEY,settings);
@@ -536,20 +591,15 @@ $('#range30').addEventListener('click',()=>setRange(30));
 function setRange(r){range=r;$('#rangeLbl').textContent='last '+r+' days';drawChart();}
 window.addEventListener('resize',()=>{if($('#view-history').classList.contains('active'))drawChart();});
 
-/* keep timer accurate if tab is backgrounded */
-let lastVisible=Date.now();
+/* When the tab is backgrounded, browser timers are throttled or frozen.
+   On return, recompute from the wall clock and replay any elapsed phases. */
 document.addEventListener('visibilitychange',()=>{
-  if(document.hidden){lastVisible=Date.now();}
-  else if(running){
-    const elapsed=Math.floor((Date.now()-lastVisible)/1000);
-    if(elapsed>0){remaining=Math.max(0,remaining-elapsed);
-      if(remaining<=0){renderTimer();finishPhase();}else renderTimer();}
-  }
+  if(!document.hidden&&running){clearInterval(ticker);catchUp();}
 });
 
 /* ===================== INIT ===================== */
 syncSettingsUI();
-setMode('focus');
+restoreTimer();
 refreshStats();
 if('serviceWorker' in navigator){
   // Reload once when a newly-deployed service worker takes control (skips on first install).
